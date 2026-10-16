@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
@@ -33,31 +32,20 @@ def init_billing_db():
     with db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS billing_payments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reference TEXT UNIQUE NOT NULL,
-            user_id INTEGER NOT NULL,
-            email TEXT NOT NULL,
-            plan TEXT NOT NULL,
-            amount INTEGER NOT NULL,
-            currency TEXT NOT NULL DEFAULT 'NGN',
-            status TEXT NOT NULL DEFAULT 'pending',
-            provider_transaction_id TEXT,
-            created_at TEXT NOT NULL,
-            paid_at TEXT
+            id INTEGER PRIMARY KEY AUTOINCREMENT, reference TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL, email TEXT NOT NULL, plan TEXT NOT NULL,
+            amount INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'NGN',
+            status TEXT NOT NULL DEFAULT 'pending', provider_transaction_id TEXT,
+            created_at TEXT NOT NULL, paid_at TEXT
         );
         CREATE TABLE IF NOT EXISTS billing_usage(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            feature TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            feature TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_billing_usage_user_feature_date ON billing_usage(user_id,feature,created_at);
         CREATE TABLE IF NOT EXISTS billing_subscriptions(
-            user_id INTEGER PRIMARY KEY,
-            plan TEXT NOT NULL DEFAULT 'free',
-            status TEXT NOT NULL DEFAULT 'free',
-            starts_at TEXT,
-            expires_at TEXT,
+            user_id INTEGER PRIMARY KEY, plan TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'free', starts_at TEXT, expires_at TEXT,
             updated_at TEXT NOT NULL
         );
         """)
@@ -71,30 +59,28 @@ def current_user(request: Request):
         raise HTTPException(401, "Please sign in to manage billing.")
     return int(uid), str(email).strip().lower()
 
-def paystack_key():
-    key = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
+def flutterwave_key():
+    key = os.getenv("FLW_SECRET_KEY", "").strip()
     if not key:
-        raise HTTPException(503, "Payments are not configured yet. The app owner must add PAYSTACK_SECRET_KEY in Railway Variables.")
+        raise HTTPException(503, "Flutterwave payments are not configured. The owner must add FLW_SECRET_KEY in Railway Variables.")
     return key
 
-def paystack_request(path, method="GET", payload=None):
+def flw_request(path, method="GET", payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
-        "https://api.paystack.co" + path,
-        data=data,
-        method=method,
-        headers={"Authorization": "Bearer " + paystack_key(), "Content-Type": "application/json"},
+        "https://api.flutterwave.com" + path, data=data, method=method,
+        headers={"Authorization": "Bearer " + flutterwave_key(), "Content-Type": "application/json", "Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=25) as response:
             body = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:300]
-        raise HTTPException(502, "Payment provider rejected the request (" + str(exc.code) + "). " + detail) from exc
+        raise HTTPException(502, "Flutterwave rejected the request (" + str(exc.code) + "). " + detail) from exc
     except (TimeoutError, urllib.error.URLError, ValueError) as exc:
-        raise HTTPException(502, "Payment provider is temporarily unavailable. Try again shortly.") from exc
-    if not body.get("status"):
-        raise HTTPException(502, "Payment provider could not complete the request.")
+        raise HTTPException(502, "Flutterwave is temporarily unavailable. Please retry shortly.") from exc
+    if body.get("status") != "success":
+        raise HTTPException(502, "Flutterwave could not complete the request.")
     return body.get("data") or {}
 
 def active_subscription(uid):
@@ -103,8 +89,7 @@ def active_subscription(uid):
         row = c.execute("SELECT plan,status,starts_at,expires_at,updated_at FROM billing_subscriptions WHERE user_id=?", (uid,)).fetchone()
     if not row:
         return {"plan": "free", "status": "free", "expires_at": None, "active": True}
-    plan = row["plan"]
-    expiry = row["expires_at"]
+    plan, expiry = row["plan"], row["expires_at"]
     active = bool(plan != "free" and expiry and datetime.fromisoformat(expiry) > now)
     return {"plan": plan if active else "free", "status": "active" if active else ("expired" if plan != "free" else "free"), "expires_at": expiry, "active": active}
 
@@ -115,15 +100,15 @@ def apply_successful_payment(reference, transaction):
             return False
         if payment["status"] == "success":
             return True
-        if transaction.get("status") != "success" or transaction.get("reference") != reference:
+        if transaction.get("status") != "successful" or transaction.get("tx_ref") != reference:
             return False
         if str(transaction.get("currency", "")).upper() != payment["currency"]:
             return False
         try:
-            paid_amount = int(transaction.get("amount", 0))
+            paid_minor = int(round(float(transaction.get("amount", 0)) * 100))
         except (TypeError, ValueError):
             return False
-        if paid_amount < int(payment["amount"]):
+        if paid_minor < int(payment["amount"]):
             return False
         now = datetime.now(timezone.utc)
         existing = c.execute("SELECT expires_at FROM billing_subscriptions WHERE user_id=?", (payment["user_id"],)).fetchone()
@@ -145,20 +130,25 @@ def apply_successful_payment(reference, transaction):
                   (payment["user_id"], payment["plan"], now.isoformat(), expiry, now.isoformat()))
         return True
 
+def _verify_transaction(transaction_id):
+    if not str(transaction_id).isdigit():
+        raise HTTPException(422, "Invalid Flutterwave transaction ID.")
+    return flw_request("/v3/transactions/" + str(transaction_id) + "/verify")
 
-LIMITS = {
-    "free": {"generation": 10, "audit": 3},
-    "creator": {"generation": 100, "audit": 25},
-    "pro": {"generation": 500, "audit": 100},
-    "agency": {"generation": 2000, "audit": 500},
-}
+LIMITS = {"free": {"generation": 10, "audit": 3}, "creator": {"generation": 100, "audit": 25}, "pro": {"generation": 500, "audit": 100}, "agency": {"generation": 2000, "audit": 500}}
 
 def _effective_plan(uid):
     sub = active_subscription(uid)
     return sub["plan"] if sub["active"] else "free"
 
+def _is_admin(uid):
+    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
+    with db() as c:
+        row = c.execute("SELECT email FROM users WHERE id=?", (uid,)).fetchone()
+    return bool(row and row["email"].lower() in admins)
+
 def check_usage(uid, feature):
-    if feature not in ("generation", "audit"):
+    if feature not in ("generation", "audit") or _is_admin(uid):
         return
     plan = _effective_plan(uid)
     limit = LIMITS[plan][feature]
@@ -166,8 +156,7 @@ def check_usage(uid, feature):
     with db() as c:
         row = c.execute("SELECT COUNT(*) AS n FROM billing_usage WHERE user_id=? AND feature=? AND substr(created_at,1,7)=?", (uid, feature, month)).fetchone()
     if int(row["n"]) >= limit:
-        plan_name = PLANS[plan]["name"]
-        raise HTTPException(402, f"Monthly {feature} limit reached for the {plan_name} plan ({limit}). Upgrade your plan or try again next month.")
+        raise HTTPException(402, f"Monthly {feature} limit reached for the {PLANS[plan]['name']} plan ({limit}). Upgrade your plan or try again next month.")
 
 def record_usage(uid, feature):
     with db() as c:
@@ -178,16 +167,16 @@ class CheckoutInput(BaseModel):
 
 @router.get("/plans")
 def list_plans():
-    return {"currency": "NGN", "plans": [{"id": key, **value} for key, value in PLANS.items()]}
+    return {"currency": "NGN", "provider": "Flutterwave", "plans": [{"id": key, **value} for key, value in PLANS.items()]}
 
 @router.get("/status")
 def billing_status(request: Request):
     uid, email = current_user(request)
     sub = active_subscription(uid)
+    admin = _is_admin(uid)
     with db() as c:
         recent = c.execute("SELECT reference,plan,amount,currency,status,created_at,paid_at FROM billing_payments WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,)).fetchall()
-    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
-    return {"email": email, "subscription": sub, "plans": [{"id": k, **v} for k, v in PLANS.items()], "payments": [dict(r) for r in recent], "is_admin": email in admins}
+    return {"email": email, "subscription": sub, "plans": [{"id": k, **v} for k, v in PLANS.items()], "payments": [dict(r) | {"amount": r["amount"] / 100} for r in recent], "is_admin": admin, "admin_free_access": admin}
 
 @router.post("/checkout")
 def checkout(body: CheckoutInput, request: Request):
@@ -202,77 +191,78 @@ def checkout(body: CheckoutInput, request: Request):
         c.execute("INSERT INTO billing_payments(reference,user_id,email,plan,amount,currency,status,created_at) VALUES(?,?,?,?,?,'NGN','pending',?)",
                   (reference, uid, email, plan_id, int(plan["amount"] * 100), now))
     try:
-        result = paystack_request("/transaction/initialize", "POST", {
-            "email": email,
-            "amount": str(int(plan["amount"] * 100)),
-            "currency": "NGN",
-            "reference": reference,
-            "callback_url": APP_URL + "/?payment=callback",
-            "metadata": {"user_id": uid, "plan": plan_id, "product": "King Zarry AI Social Booster"},
+        result = flw_request("/v3/payments", "POST", {
+            "tx_ref": reference, "amount": plan["amount"], "currency": "NGN",
+            "redirect_url": APP_URL + "/?payment=callback",
+            "customer": {"email": email, "name": email.split("@")[0]},
+            "customizations": {"title": "King Zarry AI Social Booster", "description": plan["name"] + " plan"},
+            "meta": {"user_id": uid, "plan": plan_id, "product": "King Zarry AI Social Booster"},
+            "configuration": {"session_duration": 30, "max_retry_attempt": 3},
         })
     except Exception:
         with db() as c:
             c.execute("UPDATE billing_payments SET status='initialization_failed' WHERE reference=? AND status='pending'", (reference,))
         raise
-    url = result.get("authorization_url")
-    if not url or not str(url).startswith("https://checkout.paystack.com/"):
-        raise HTTPException(502, "Payment provider did not return a valid checkout link.")
-    return {"authorization_url": url, "reference": reference, "plan": plan_id, "amount": plan["amount"], "currency": "NGN"}
+    url = result.get("link")
+    if not url or not str(url).startswith("https://checkout.flutterwave.com/"):
+        raise HTTPException(502, "Flutterwave did not return a valid hosted checkout URL.")
+    return {"authorization_url": url, "reference": reference, "plan": plan_id, "amount": plan["amount"], "currency": "NGN", "provider": "Flutterwave"}
 
 @router.get("/verify")
-def verify_payment(reference: str, request: Request):
+def verify_payment(tx_ref: str, transaction_id: str, request: Request):
     uid, _ = current_user(request)
-    reference = reference.strip()
-    if not reference or len(reference) > 100:
+    tx_ref = tx_ref.strip()
+    if not tx_ref or len(tx_ref) > 100:
         raise HTTPException(422, "Invalid payment reference.")
     with db() as c:
-        payment = c.execute("SELECT * FROM billing_payments WHERE reference=? AND user_id=?", (reference, uid)).fetchone()
+        payment = c.execute("SELECT * FROM billing_payments WHERE reference=? AND user_id=?", (tx_ref, uid)).fetchone()
     if not payment:
         raise HTTPException(404, "Payment reference was not found for this account.")
     if payment["status"] == "success":
         return {"ok": True, "status": "success", "subscription": active_subscription(uid)}
-    transaction = paystack_request("/transaction/verify/" + reference)
-    if not apply_successful_payment(reference, transaction):
-        if transaction.get("status") not in ("success",):
+    transaction = _verify_transaction(transaction_id)
+    if transaction.get("tx_ref") != tx_ref:
+        raise HTTPException(400, "Flutterwave transaction reference did not match this checkout.")
+    if not apply_successful_payment(tx_ref, transaction):
+        if transaction.get("status") != "successful":
             with db() as c:
-                c.execute("UPDATE billing_payments SET status=? WHERE reference=? AND status='pending'", (str(transaction.get("status", "pending"))[:40], reference))
+                c.execute("UPDATE billing_payments SET status=? WHERE reference=? AND status='pending'", (str(transaction.get("status", "pending"))[:40], tx_ref))
             return {"ok": False, "status": transaction.get("status", "pending"), "message": "Payment is not confirmed yet."}
         raise HTTPException(400, "Payment details did not match the expected order. Access was not activated.")
     return {"ok": True, "status": "success", "subscription": active_subscription(uid)}
 
 @router.post("/webhook")
-async def paystack_webhook(request: Request):
-    secret = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
-    if not secret:
-        raise HTTPException(503, "Payment webhook is not configured.")
-    raw = await request.body()
-    signature = request.headers.get("x-paystack-signature", "")
-    expected = hmac.new(secret.encode(), raw, hashlib.sha512).hexdigest()
+async def flutterwave_webhook(request: Request):
+    expected = os.getenv("FLW_SECRET_HASH", "").strip()
+    if not expected:
+        raise HTTPException(503, "Flutterwave webhook secret hash is not configured.")
+    signature = request.headers.get("verif-hash", "")
     if not signature or not hmac.compare_digest(signature, expected):
-        raise HTTPException(401, "Invalid webhook signature.")
+        raise HTTPException(401, "Invalid Flutterwave webhook signature.")
     try:
-        event = json.loads(raw.decode())
-    except (UnicodeDecodeError, ValueError):
+        event = await request.json()
+    except ValueError:
         raise HTTPException(400, "Invalid webhook body.")
-    if event.get("event") == "charge.success":
+    if event.get("event") in ("charge.completed", "charge.completed"):
         data = event.get("data") or {}
-        reference = str(data.get("reference", ""))
-        if reference:
+        reference = str(data.get("tx_ref", ""))
+        transaction_id = data.get("id")
+        if reference and transaction_id:
             with db() as c:
                 payment = c.execute("SELECT reference FROM billing_payments WHERE reference=?", (reference,)).fetchone()
             if payment:
-                verified = paystack_request("/transaction/verify/" + reference)
-                apply_successful_payment(reference, verified)
+                transaction = _verify_transaction(str(transaction_id))
+                if transaction.get("tx_ref") == reference:
+                    apply_successful_payment(reference, transaction)
     return {"received": True}
 
 @router.get("/admin/sales")
 def admin_sales(request: Request):
-    _, email = current_user(request)
-    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
-    if not admins or email not in admins:
+    uid, _ = current_user(request)
+    if not _is_admin(uid):
         raise HTTPException(403, "Admin billing access is not enabled for this account.")
     with db() as c:
-        totals = c.execute("SELECT COUNT(*) AS payment_count, COALESCE(SUM(amount),0) AS gross_kobo FROM billing_payments WHERE status='success'").fetchone()
-        by_plan = c.execute("SELECT plan,COUNT(*) AS sales,COALESCE(SUM(amount),0) AS gross_kobo FROM billing_payments WHERE status='success' GROUP BY plan ORDER BY gross_kobo DESC").fetchall()
+        totals = c.execute("SELECT COUNT(*) AS payment_count, COALESCE(SUM(amount),0) AS gross_minor FROM billing_payments WHERE status='success'").fetchone()
+        by_plan = c.execute("SELECT plan,COUNT(*) AS sales,COALESCE(SUM(amount),0) AS gross_minor FROM billing_payments WHERE status='success' GROUP BY plan ORDER BY gross_minor DESC").fetchall()
         recent = c.execute("SELECT email,plan,amount,currency,paid_at,reference FROM billing_payments WHERE status='success' ORDER BY id DESC LIMIT 50").fetchall()
-    return {"payment_count": totals["payment_count"], "gross_ngn": totals["gross_kobo"] / 100, "by_plan": [{"plan": r["plan"], "sales": r["sales"], "gross_ngn": r["gross_kobo"] / 100} for r in by_plan], "recent": [dict(r) | {"amount": r["amount"] / 100} for r in recent]}
+    return {"payment_count": totals["payment_count"], "gross_ngn": totals["gross_minor"] / 100, "by_plan": [{"plan": r["plan"], "sales": r["sales"], "gross_ngn": r["gross_minor"] / 100} for r in by_plan], "recent": [dict(r) | {"amount": r["amount"] / 100} for r in recent]}
