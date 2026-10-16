@@ -296,7 +296,7 @@ def _get_account(uid, account_id):
 def publish(body: PublishInput, request: Request):
     uid = _uid(request)
     row = _get_account(uid,body.account_id)
-    token = _open(row["token_cipher"])
+    token = _access_token(row)
     platform = row["platform"]
     meta = json.loads(row["metadata"] or "{}")
     text = body.text.strip()
@@ -340,7 +340,7 @@ def analytics(platform: str, request: Request):
         raise HTTPException(404,"No connected account for this platform.")
     results = []
     for row in rows:
-        token = _open(row["token_cipher"])
+        token = _access_token(row)
         metrics = {}
         if platform == "youtube":
             data = _http_json("https://www.googleapis.com/youtube/v3/channels?part=statistics,snippet&mine=true",headers={"Authorization":"Bearer "+token})
