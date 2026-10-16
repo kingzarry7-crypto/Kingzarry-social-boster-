@@ -43,7 +43,7 @@ async function loadBilling(){
   try{
     var d=await api('/api/billing/status');
     var sub=d.subscription||{plan:'free',status:'free'};
-    $('billingStatus').innerHTML='<strong>Current plan: '+esc((sub.plan||'free').toUpperCase())+'</strong><p class="muted">Status: '+esc(sub.status||'free')+(sub.expires_at?' · Access until '+esc(new Date(sub.expires_at).toLocaleString()):'')+'</p>';
+    $('billingStatus').innerHTML='<strong>Current plan: '+esc((sub.plan||'free').toUpperCase())+'</strong><p class="muted">Status: '+esc(sub.status||'free')+(d.admin_free_access?' · Admin free access (unlimited AI quotas)':'')+(sub.expires_at?' · Access until '+esc(new Date(sub.expires_at).toLocaleString()):'')+'</p>';
     $('billingPlans').innerHTML=(d.plans||[]).map(function(p){
       var current=(sub.plan===p.id && sub.status==='active') || (p.id==='free'&&sub.plan==='free');
       var features=p.features.map(function(x){return '<li>'+esc(x)+'</li>'}).join('');
