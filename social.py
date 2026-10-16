@@ -87,7 +87,7 @@ def _config(platform):
     configs = {
         "facebook": {"client_id":"META_APP_ID","client_secret":"META_APP_SECRET","authorize":"https://www.facebook.com/v23.0/dialog/oauth","token":"https://graph.facebook.com/v23.0/oauth/access_token","scopes":["pages_show_list","pages_read_engagement","pages_manage_posts","instagram_basic","instagram_content_publish"]},
         "instagram": {"client_id":"META_APP_ID","client_secret":"META_APP_SECRET","authorize":"https://www.facebook.com/v23.0/dialog/oauth","token":"https://graph.facebook.com/v23.0/oauth/access_token","scopes":["pages_show_list","pages_read_engagement","pages_manage_posts","instagram_basic","instagram_content_publish"]},
-        "tiktok": {"client_id":"TIKTOK_CLIENT_KEY","client_secret":"TIKTOK_CLIENT_SECRET","authorize":"https://www.tiktok.com/v2/auth/authorize/","token":"https://open.tiktokapis.com/v2/oauth/token/","scopes":["user.info.basic","user.info.profile","video.publish","video.upload"]},
+        "tiktok": {"client_id":"TIKTOK_CLIENT_KEY","client_secret":"TIKTOK_CLIENT_SECRET","authorize":"https://www.tiktok.com/v2/auth/authorize/","token":"https://open.tiktokapis.com/v2/oauth/token/","scopes":["user.info.basic","user.info.profile","user.info.stats","video.publish","video.upload"]},
         "youtube": {"client_id":"GOOGLE_CLIENT_ID","client_secret":"GOOGLE_CLIENT_SECRET","authorize":"https://accounts.google.com/o/oauth2/v2/auth","token":"https://oauth2.googleapis.com/token","scopes":["openid","email","profile","https://www.googleapis.com/auth/youtube.readonly","https://www.googleapis.com/auth/youtube.upload"]},
         "x": {"client_id":"X_CLIENT_ID","client_secret":"X_CLIENT_SECRET","authorize":"https://twitter.com/i/oauth2/authorize","token":"https://api.x.com/2/oauth2/token","scopes":["tweet.read","tweet.write","users.read","offline.access"]},
     }
@@ -131,6 +131,38 @@ def _store(uid, platform, provider_id, handle, display_name, token, refresh, exp
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(user_id,platform,provider_user_id) DO UPDATE SET handle=excluded.handle,display_name=excluded.display_name,token_cipher=excluded.token_cipher,refresh_cipher=excluded.refresh_cipher,token_expires_at=excluded.token_expires_at,scopes=excluded.scopes,metadata=excluded.metadata,updated_at=excluded.updated_at""",
         (uid,platform,str(provider_id),handle or "",display_name or "",_seal(token),_seal(refresh) if refresh else None,expires_at," ".join(scopes or []),json.dumps(metadata or {}),_now(),_now()))
+
+def _access_token(row):
+    token = _access_token(row)
+    expires_at = row["token_expires_at"]
+    refresh_cipher = row["refresh_cipher"]
+    if not expires_at or expires_at > int(time.time()) + 90 or not refresh_cipher:
+        return token
+    platform = row["platform"]
+    cfg = _config(platform)
+    refresh = _open(refresh_cipher)
+    payload = {"grant_type":"refresh_token","refresh_token":refresh}
+    headers = {}
+    if platform == "youtube":
+        payload.update({"client_id":cfg["client_id"],"client_secret":cfg["client_secret"]})
+    elif platform == "tiktok":
+        payload.update({"client_key":cfg["client_id"],"client_secret":cfg["client_secret"]})
+    elif platform == "x":
+        payload["client_id"] = cfg["client_id"]
+        headers["Authorization"] = "Basic " + base64.b64encode((cfg["client_id"]+":"+cfg["client_secret"]).encode()).decode()
+    else:
+        # Meta page tokens may remain valid longer than the user token; reconnect if the provider rejects them.
+        return token
+    data = _http_json(cfg["token"],"POST",payload,headers,form=True)
+    new_token = data.get("access_token")
+    if not new_token:
+        return token
+    new_refresh = data.get("refresh_token") or refresh
+    new_expiry = int(time.time()) + int(data.get("expires_in",3600))
+    with _db() as c:
+        c.execute("UPDATE social_accounts SET token_cipher=?,refresh_cipher=?,token_expires_at=?,updated_at=? WHERE id=?",
+                  (_seal(new_token),_seal(new_refresh),new_expiry,_now(),row["id"]))
+    return new_token
 
 def _account(row):
     return {"id":row["id"],"platform":row["platform"],"provider_user_id":row["provider_user_id"],"username":row["handle"],"display_name":row["display_name"],"connected":True,"scopes":row["scopes"].split(),"expires_at":row["token_expires_at"],"metadata":json.loads(row["metadata"] or "{}"),"connected_at":row["created_at"]}
