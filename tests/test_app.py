@@ -14,7 +14,8 @@ def test_health_and_platform_status():
     assert client.get("/health").json()["status"] == "ok"
     status = client.get("/api/status").json()
     assert "Instagram" in status["platforms"]
-    assert status["features"]["publishing"] is False
+    assert status["features"]["official_social_oauth"] is True
+    assert status["features"]["publishing"]["youtube"] is False
 
 def test_dashboard_requires_login():
     client.post("/api/auth/logout")
