@@ -26,7 +26,9 @@ app = FastAPI(title=APP_NAME, version="1.0.0", description="Ethical AI social gr
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET, same_site="lax", https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true")
 
 from social import router as social_router
+from billing import router as billing_router
 app.include_router(social_router)
+app.include_router(billing_router)
 
 @contextmanager
 def db():
