@@ -63,7 +63,7 @@ async function processPaymentReturn(){
   var ref=q.get('tx_ref');var transactionId=q.get('transaction_id');
   if(q.get('payment')!=='callback'&&!ref)return;
   if(!ref||!transactionId){notify('Flutterwave return is missing a transaction reference or ID. Check payment history.');return}
-  $('billingStatus').textContent='Verifying payment with Paystack…';
+  $('billingStatus').textContent='Verifying payment with Flutterwave…';
   try{var d=await api('/api/billing/verify?tx_ref='+encodeURIComponent(ref)+'&transaction_id='+encodeURIComponent(transactionId));if(d.ok){notify('Payment verified. Your plan is active.')}else{notify('Payment is not confirmed yet. Refresh billing shortly.')}history.replaceState({},'',window.location.pathname);await loadBilling()}
   catch(e){$('billingStatus').textContent=e.message;notify(e.message)}
 }
