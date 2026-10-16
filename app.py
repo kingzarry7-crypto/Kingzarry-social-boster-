@@ -225,7 +225,7 @@ def send_sms_otp(phone, code):
     if not api_key or not sender:
         raise HTTPException(503, "SMS verification is not configured. Add TERMII_API_KEY and an approved TERMII_SENDER_ID in Railway Variables.")
     payload = json.dumps({
-        "api_key": api_key, "to": phone, "from": sender,
+        "api_key": api_key, "to": phone.lstrip("+"), "from": sender,
         "sms": "Your King Zarry Social Booster verification code is " + code + ". It expires in 10 minutes.",
         "type": "plain", "channel": "generic"
     }).encode()
@@ -233,7 +233,7 @@ def send_sms_otp(phone, code):
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
             result = json.loads(response.read().decode())
-        if str(result.get("code", "")) not in ("ok", "200", "0") and result.get("message", "").lower() not in ("message sent", "ok"):
+        if str(result.get("code", "")).lower() != "ok" and "sent" not in str(result.get("message", "")).lower():
             raise ValueError("SMS provider did not confirm acceptance")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(502, "The SMS provider could not send your verification code. Check Termii balance, sender ID approval and settings.") from exc
