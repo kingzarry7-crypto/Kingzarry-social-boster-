@@ -133,7 +133,7 @@ def _store(uid, platform, provider_id, handle, display_name, token, refresh, exp
         (uid,platform,str(provider_id),handle or "",display_name or "",_seal(token),_seal(refresh) if refresh else None,expires_at," ".join(scopes or []),json.dumps(metadata or {}),_now(),_now()))
 
 def _access_token(row):
-    token = _access_token(row)
+    token = _open(row["token_cipher"])
     expires_at = row["token_expires_at"]
     refresh_cipher = row["refresh_cipher"]
     if not expires_at or expires_at > int(time.time()) + 90 or not refresh_cipher:
