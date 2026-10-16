@@ -17,10 +17,10 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 APP_URL = os.getenv("APP_URL", "https://social-booster-api-production.up.railway.app").rstrip("/")
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(Path(__file__).resolve().parent / "social_booster.db"))
 PLANS = {
-    "free": {"name": "Free", "amount": 0, "currency": "NGN", "period_days": 0, "features": ["Starter content tools", "Save drafts", "Plan campaigns"]},
-    "creator": {"name": "Creator", "amount": 3000, "currency": "NGN", "period_days": 30, "features": ["More content creation", "Creator workflow", "30-day access"]},
-    "pro": {"name": "Pro", "amount": 8000, "currency": "NGN", "period_days": 30, "features": ["Advanced creator workflow", "Social account tools", "30-day access"]},
-    "agency": {"name": "Agency", "amount": 25000, "currency": "NGN", "period_days": 30, "features": ["Agency workflow", "Manage client campaigns", "30-day access"]},
+    "free": {"name": "Free", "amount": 0, "currency": "NGN", "period_days": 0, "features": ["10 AI generations/month", "3 profile audits/month", "Save drafts and plan campaigns"]},
+    "creator": {"name": "Creator", "amount": 3000, "currency": "NGN", "period_days": 30, "features": ["100 AI generations/month", "25 profile audits/month", "30-day access"]},
+    "pro": {"name": "Pro", "amount": 8000, "currency": "NGN", "period_days": 30, "features": ["500 AI generations/month", "100 profile audits/month", "30-day access"]},
+    "agency": {"name": "Agency", "amount": 25000, "currency": "NGN", "period_days": 30, "features": ["2,000 AI generations/month", "500 profile audits/month", "30-day access"]},
 }
 
 def db():
@@ -45,6 +45,13 @@ def init_billing_db():
             created_at TEXT NOT NULL,
             paid_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS billing_usage(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            feature TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_billing_usage_user_feature_date ON billing_usage(user_id,feature,created_at);
         CREATE TABLE IF NOT EXISTS billing_subscriptions(
             user_id INTEGER PRIMARY KEY,
             plan TEXT NOT NULL DEFAULT 'free',
@@ -137,6 +144,34 @@ def apply_successful_payment(reference, transaction):
                      starts_at=excluded.starts_at,expires_at=excluded.expires_at,updated_at=excluded.updated_at""",
                   (payment["user_id"], payment["plan"], now.isoformat(), expiry, now.isoformat()))
         return True
+
+
+LIMITS = {
+    "free": {"generation": 10, "audit": 3},
+    "creator": {"generation": 100, "audit": 25},
+    "pro": {"generation": 500, "audit": 100},
+    "agency": {"generation": 2000, "audit": 500},
+}
+
+def _effective_plan(uid):
+    sub = active_subscription(uid)
+    return sub["plan"] if sub["active"] else "free"
+
+def check_usage(uid, feature):
+    if feature not in ("generation", "audit"):
+        return
+    plan = _effective_plan(uid)
+    limit = LIMITS[plan][feature]
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    with db() as c:
+        row = c.execute("SELECT COUNT(*) AS n FROM billing_usage WHERE user_id=? AND feature=? AND substr(created_at,1,7)=?", (uid, feature, month)).fetchone()
+    if int(row["n"]) >= limit:
+        plan_name = PLANS[plan]["name"]
+        raise HTTPException(402, f"Monthly {feature} limit reached for the {plan_name} plan ({limit}). Upgrade your plan or try again next month.")
+
+def record_usage(uid, feature):
+    with db() as c:
+        c.execute("INSERT INTO billing_usage(user_id,feature,created_at) VALUES(?,?,?)", (uid, feature, datetime.now(timezone.utc).isoformat()))
 
 class CheckoutInput(BaseModel):
     plan: str = Field(min_length=1, max_length=30)
