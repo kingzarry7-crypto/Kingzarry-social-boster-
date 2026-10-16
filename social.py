@@ -330,6 +330,18 @@ def publish(body: PublishInput, request: Request):
         raise HTTPException(501,"YouTube OAuth and channel access are connected, but video upload requires a video-file upload flow. Use the saved calendar until that upload flow is enabled.")
     raise HTTPException(400,"Publishing is not supported for this account.")
 
+@router.get("/publish/status/{publish_id}")
+def publish_status(publish_id: str, account_id: int, request: Request):
+    uid = _uid(request)
+    row = _get_account(uid,account_id)
+    if row["platform"] != "tiktok":
+        raise HTTPException(422,"Publishing status polling is currently supported for TikTok submissions.")
+    token = _access_token(row)
+    result = _http_json("https://open.tiktokapis.com/v2/post/publish/status/fetch/","POST",{"publish_id":publish_id},{"Authorization":"Bearer "+token})
+    data = result.get("data",{})
+    provider_status = data.get("status","UNKNOWN")
+    return {"platform":"tiktok","publish_id":publish_id,"provider_status":provider_status,"published":provider_status=="PUBLISH_COMPLETE","failed":provider_status=="FAILED","fail_reason":data.get("fail_reason"),"result":result}
+
 @router.get("/analytics/{platform}")
 def analytics(platform: str, request: Request):
     uid = _uid(request)
