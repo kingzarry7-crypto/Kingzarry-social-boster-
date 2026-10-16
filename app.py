@@ -26,7 +26,7 @@ app = FastAPI(title=APP_NAME, version="1.0.0", description="Ethical AI social gr
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET, same_site="lax", https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true")
 
 from social import router as social_router
-from billing import router as billing_router
+from billing import router as billing_router, check_usage, record_usage
 app.include_router(social_router)
 app.include_router(billing_router)
 
@@ -212,7 +212,8 @@ def dashboard(request: Request):
 
 @app.post("/api/ai/generate")
 def generate(body: GenerateInput, request: Request):
-    user_id(request)
+    uid = user_id(request)
+    check_usage(uid, "generation")
     platform = platform_name(body.platform)
     kind = body.kind.strip().lower()
     if kind not in CONTENT_TYPES - {"profile_audit"}:
@@ -223,11 +224,13 @@ def generate(body: GenerateInput, request: Request):
     prompt = "Create " + kind + " for " + platform + ". Topic: " + topic + ". Audience: " + (audience or "not specified") + ". Tone: " + tone + ". Goal: " + body.goal[:300] + ". Be useful and specific. Do not invent metrics or recommend fake followers, fake likes, spam DMs, or policy evasion."
     result = ai_complete("You are King Zarry AI Social Booster, an expert ethical social media strategist. Help creators grow through valuable content and authentic community engagement. Never claim an account is connected or content published unless verified by an integration.",prompt)
     source = "ai-provider" if result else "built-in"
+    record_usage(uid, "generation")
     return {"content":result or fallback_content(kind,platform,topic,audience,tone),"source":source,"platform":platform,"kind":kind}
 
 @app.post("/api/audit")
 def audit(body: AuditInput, request: Request):
     uid = user_id(request)
+    check_usage(uid, "audit")
     platform = platform_name(body.platform)
     username = required(body.username.lstrip("@"),"Username",100).replace(" ","")
     niche = required(body.niche,"Niche",300)
@@ -237,6 +240,7 @@ def audit(body: AuditInput, request: Request):
     result = ai_complete("You are a careful ethical social media consultant. Never claim you accessed the account or scraped data.",prompt,1500)
     if not result:
         result = "PROFILE AUDIT — @" + username + " (" + platform + ")\n\nScope: Starter audit based only on details you supplied; this is not a live account scan.\n\nPOSITIONING\n- Explain who you help, what outcome you offer, and what to do next.\n- Make the promise specific to " + niche + ".\n\nBIO CHECKLIST\n- Lead with audience and value.\n- Add only genuine proof.\n- Use one clear call to action.\n\nCONTENT TO TEST\n1. Beginner how-to.\n2. Common mistake and correction.\n3. Behind-the-scenes process.\n4. Case study with verified results.\n5. Answer a frequent question.\n\n2-WEEK EXPERIMENT\n- Publish 3–5 useful pieces weekly at a sustainable cadence.\n- Test one hook or format at a time.\n- Reply to genuine comments.\n- Track reach, watch time, saves, shares, profile visits and clicks where available.\n\nAdd your bio and recent post descriptions for a more tailored review. No live metrics were retrieved."
+    record_usage(uid, "audit")
     with db() as c:
         cur = c.execute("INSERT INTO audits(user_id,platform,username,niche,result,created_at) VALUES(?,?,?,?,?,?)",(uid,platform,username,niche,result,now_iso()))
         audit_id = cur.lastrowid
