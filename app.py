@@ -25,6 +25,9 @@ CONTENT_TYPES = {"caption", "hashtags", "video_script", "content_ideas", "calend
 app = FastAPI(title=APP_NAME, version="1.0.0", description="Ethical AI social growth workspace")
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET, same_site="lax", https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true")
 
+from social import router as social_router
+app.include_router(social_router)
+
 @contextmanager
 def db():
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
