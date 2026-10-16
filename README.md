@@ -49,15 +49,39 @@ The app never asks for social passwords. The content calendar currently stores p
 
 ## Payments and owner earnings
 
-The billing UI uses Paystack checkout in NGN. Add the following in Railway → `social-booster-api` → Variables:
+The billing UI uses Flutterwave Standard checkout in NGN. Add these variables to Railway → `social-booster-api` → Variables. Do not put secrets in GitHub or frontend code.
 
-- `PAYSTACK_SECRET_KEY`: your Paystack secret key. Use a test secret first; switch to a live secret only after testing and activating your Paystack merchant account. Never commit this key to GitHub or place it in frontend code.
-- `ADMIN_EMAILS`: comma-separated email address(es) that should see the owner sales summary, for example the email you use to sign in as the app owner.
+- `FLW_SECRET_KEY`: Flutterwave test secret key for initial testing; switch to live only after merchant activation and test verification.
+- `FLW_SECRET_HASH`: webhook secret hash configured in Flutterwave Dashboard → Settings → Webhooks.
+- `ADMIN_EMAILS`: comma-separated email address(es) used to sign in as the app owner. These accounts receive admin sales access and unlimited AI generation/profile-audit quotas.
+- `COOKIE_SECURE=true` and `APP_SECRET`: keep secure session cookies and a stable random session/encryption secret.
 
-Set the Paystack webhook URL to:
+Configure this webhook URL in Flutterwave:
 
 `https://social-booster-api-production.up.railway.app/api/billing/webhook`
 
-The webhook checks Paystack's signature and re-verifies successful transactions before granting access. The browser return also verifies the transaction server-side. Payment records and plan access are stored in the persistent database. Current tiers are Free (10 AI generations and 3 profile audits/month), Creator (₦3,000/30 days), Pro (₦8,000/30 days), and Agency (₦25,000/30 days). Paid tiers include monthly quotas shown in the app. Paid access is currently a 30-day purchase with manual renewal; automatic recurring charges are not enabled. The admin gross-sales view is not the same as net bank payout: provider fees, refunds and settlement timing may affect what reaches your bank.
+The backend verifies each transaction with Flutterwave before activating access and verifies webhook signatures. Payment records and plan access are stored in the persistent database. Current tiers are Free (10 AI generations and 3 profile audits/month), Creator (₦3,000/30 days), Pro (₦8,000/30 days), and Agency (₦25,000/30 days). Paid access is currently a 30-day purchase with manual renewal; recurring billing is not enabled. Gross sales are not net bank payouts: provider fees, refunds and settlement timing may affect the final payout. Railway hosts the application but does not receive the money; Flutterwave settles it to the bank account configured in your merchant account.
 
-Railway hosts the application; it does not receive customer payments. Customers pay through Paystack, and settlement goes to the bank account configured in your Paystack merchant account. Confirm test-mode payments first, then use live credentials for real customer payments.
+## Email and SMS signup verification
+
+New registrations require two separate one-time codes: one sent by email and one by SMS. Accounts are not created until both codes are correct. Codes expire after 10 minutes and attempts are limited. Real delivery is fail-closed: if provider credentials are absent or delivery fails, the app reports an error instead of pretending a code was sent.
+
+Configure these variables on Railway:
+
+- `SMTP_HOST`: SMTP server hostname from your email provider.
+- `SMTP_PORT`: usually `587` for STARTTLS, or `465` when `SMTP_USE_SSL=true`.
+- `SMTP_USER`: SMTP login username.
+- `SMTP_PASSWORD`: SMTP password or provider app password.
+- `SMTP_FROM_EMAIL`: verified sender email address.
+- `SMTP_USE_SSL`: optional; `true` for SSL SMTP, otherwise STARTTLS is used.
+- `TERMII_API_KEY`: Termii API key.
+- `TERMII_SENDER_ID`: sender ID approved by Termii for your account.
+- `PHONE_COUNTRY_CODE`: optional default country code for local numbers; defaults to `+234`.
+
+Before public signup, test that both the email and SMS arrive, and confirm incorrect/expired codes cannot create accounts. Email and SMS delivery fees/limits depend on the providers. Never log or return OTP codes.
+
+## User accounts and social account connections
+
+Every customer signs in with their own Social Booster account. Each OAuth connection is saved against that logged-in user's ID, so users authorize their own Facebook/Instagram, TikTok, YouTube or X account through the provider's official consent page; the app must never collect social account passwords. The owner does not connect all customers' accounts centrally.
+
+Add the provider credentials listed in the Social OAuth table above to Railway. Then register each exact callback URL with that platform, enable the required products/scopes, and complete any platform review/approval. Without real provider credentials and approvals, social connection buttons should show a configuration error; they cannot complete real authorization. Supported publishing differs by platform; YouTube video upload and automatic scheduled publishing are not implemented.
