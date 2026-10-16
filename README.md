@@ -1,42 +1,48 @@
 # King Zarry AI Social Booster
 
-A deployable FastAPI + SQLite social growth workspace for ethical, real-audience growth.
+FastAPI + responsive dashboard for ethical social media growth.
 
-## Features
-- Dashboard with platform overview, campaign planning, content calendar, and reports.
-- Username/profile audit using user-supplied profile details (does not scrape private data or bypass platform restrictions).
-- AI content studio for platform-specific captions, hashtags, hooks, scripts, and content calendars.
-- Campaigns and scheduled-post records stored in SQLite.
-- Provider-ready AI integration using an OpenAI-compatible endpoint (OpenRouter recommended).
-- Health endpoint and Railway deployment support.
-- Social account connection/publishing actions are intentionally disabled until official platform OAuth credentials and approved API scopes are configured. No fake followers, likes, spam, password collection, or unauthorized automation.
+## Railway service
 
-## Run locally
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
-```
-Open http://localhost:8000. API docs: http://localhost:8000/docs.
+- Health: `/health`
+- API docs: `/docs`
+- Persistent SQLite: `/data/social_booster.db` (mount volume at `/data`)
+- Service URL: https://social-booster-api-production.up.railway.app/
 
-## Railway deployment
-1. Create a Railway project from this repository.
-2. Railway detects the Dockerfile automatically.
-3. Set `APP_SECRET` to a long random secret.
-4. Optional AI settings: `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, `OPENAI_API_KEY`, and `AI_MODEL` (e.g. a model available in your account).
-5. Set `DATABASE_PATH=/data/social_booster.db` and attach a Railway Volume mounted at `/data` to preserve SQLite data between deploys.
-6. Deploy. Check `/health`.
+## Required environment
 
-## Configuration
-- `APP_SECRET`: signs session cookies. Required for production.
-- `OPENAI_API_KEY`: optional API key for content generation.
-- `OPENAI_BASE_URL`: OpenAI-compatible API base URL.
-- `AI_MODEL`: model identifier supported by the configured provider.
-- `DATABASE_PATH`: SQLite file path.
-- `ALLOWED_ORIGINS`: comma-separated frontend origins if hosting UI separately; same-origin works by default.
+Set these on the Booster service in Railway; do not commit secrets:
 
-## Important limitations
-This initial production-oriented MVP does not claim to connect social accounts until OAuth integrations are implemented and configured. Public profile analysis accepts information provided by the user and may use the AI provider to generate suggestions. Metrics are not fabricated: live analytics require each platform's official API, granted scopes, and app approval. Never place provider keys in browser code.
+- `APP_SECRET`: long random secret; keep stable to preserve sessions and decrypt saved tokens.
+- `COOKIE_SECURE=true`
+- `DATABASE_PATH=/data/social_booster.db`
+- `APP_URL=https://social-booster-api-production.up.railway.app`
+- `OPENAI_BASE_URL=https://api.openai.com/v1` (or a compatible provider API base)
+- `OPENAI_API_KEY`: provider secret
+- `AI_MODEL=gpt-4o-mini` (or a model available to your provider)
+
+Provider secrets are not automatically copied from another Railway project. Add the key using Railway's variable editor.
+
+## Social OAuth credentials
+
+Register each OAuth app with these exact HTTPS redirect URIs and add the variables to the Booster service.
+
+| Platform | Variables | Redirect URI |
+| --- | --- | --- |
+| Meta (Facebook + Instagram) | `META_APP_ID`, `META_APP_SECRET` | `https://social-booster-api-production.up.railway.app/api/social/callback/facebook` and `https://social-booster-api-production.up.railway.app/api/social/callback/instagram` |
+| TikTok | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | `https://social-booster-api-production.up.railway.app/api/social/callback/tiktok` |
+| YouTube / Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `https://social-booster-api-production.up.railway.app/api/social/callback/youtube` |
+| X | `X_CLIENT_ID`, `X_CLIENT_SECRET` | `https://social-booster-api-production.up.railway.app/api/social/callback/x` |
+
+Provider approvals, valid client credentials, approved scopes and account eligibility are required. The app reports a connection only after a successful callback. Tokens are encrypted at rest using a key derived from `APP_SECRET`; changing that secret requires users to reconnect unless tokens are migrated.
+
+## Social routes
+
+- `GET /api/social/status` — configuration and connection state.
+- `GET /api/social/accounts` — connected accounts; tokens are never returned.
+- `GET /api/social/connect/{platform}` and `GET /api/social/callback/{platform}` — OAuth authorization.
+- `DELETE /api/social/accounts/{account_id}` — disconnect an account.
+- `POST /api/social/publish` — Facebook Page text, Instagram image URL + caption, X text, and TikTok video-URL submission. TikTok submission is not confirmed publication; poll provider status. YouTube video upload is not implemented.
+- `GET /api/social/analytics/{platform}` — requests official API metrics if permissions and account type allow.
+
+The app never asks for social passwords. The content calendar currently stores plans; a background scheduler for automatic publishing is not enabled. Profile audits use supplied profile details and do not claim to scrape live public metrics.
