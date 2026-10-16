@@ -25,6 +25,11 @@ def test_dashboard_requires_login():
     client.post("/api/auth/logout")
     assert client.get("/api/dashboard").status_code == 401
 
+def test_social_account_routes_require_authentication():
+    client.post("/api/auth/logout")
+    assert client.get("/api/social/status").status_code == 401
+    assert client.get("/api/social/accounts").status_code == 401
+
 def test_register_generate_and_save_content():
     email = "test-social-booster@example.com"
     response = client.post("/api/auth/register", json={"email": email, "password": "StrongPassword123"})
