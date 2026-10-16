@@ -320,7 +320,9 @@ def logout(request: Request):
 
 @app.get("/api/me")
 def me(request: Request):
-    email = str(request.session.get("email", "")).lower()\n    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}\n    return {"email":email,"user_id":user_id(request),"role":"admin" if email in admins else "user","plan":"free","admin_free_access":email in admins}
+    email = str(request.session.get("email", "")).lower()
+    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
+    return {"email":email,"user_id":user_id(request),"role":"admin" if email in admins else "user","plan":"free","admin_free_access":email in admins}
 
 @app.get("/api/dashboard")
 def dashboard(request: Request):
