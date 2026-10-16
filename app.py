@@ -310,7 +310,8 @@ def login(body: AuthInput, request: Request):
     request.session.clear()
     request.session["user_id"] = int(row["id"])
     request.session["email"] = row["email"]
-    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}\n    return {"ok":True,"email":row["email"],"role":"admin" if row["email"].lower() in admins else "user","admin_free_access":row["email"].lower() in admins}
+    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
+    return {"ok":True,"email":row["email"],"role":"admin" if row["email"].lower() in admins else "user","admin_free_access":row["email"].lower() in admins}
 
 @app.post("/api/auth/logout")
 def logout(request: Request):
