@@ -46,3 +46,18 @@ Provider approvals, valid client credentials, approved scopes and account eligib
 - `GET /api/social/analytics/{platform}` — requests official API metrics if permissions and account type allow.
 
 The app never asks for social passwords. The content calendar currently stores plans; a background scheduler for automatic publishing is not enabled. Profile audits use supplied profile details and do not claim to scrape live public metrics.
+
+## Payments and owner earnings
+
+The billing UI uses Paystack checkout in NGN. Add the following in Railway → `social-booster-api` → Variables:
+
+- `PAYSTACK_SECRET_KEY`: your Paystack secret key. Use a test secret first; switch to a live secret only after testing and activating your Paystack merchant account. Never commit this key to GitHub or place it in frontend code.
+- `ADMIN_EMAILS`: comma-separated email address(es) that should see the owner sales summary, for example the email you use to sign in as the app owner.
+
+Set the Paystack webhook URL to:
+
+`https://social-booster-api-production.up.railway.app/api/billing/webhook`
+
+The webhook checks Paystack's signature and re-verifies successful transactions before granting access. The browser return also verifies the transaction server-side. Payment records and plan access are stored in the persistent database. Current tiers are Free (10 AI generations and 3 profile audits/month), Creator (₦3,000/30 days), Pro (₦8,000/30 days), and Agency (₦25,000/30 days). Paid tiers include monthly quotas shown in the app. Paid access is currently a 30-day purchase with manual renewal; automatic recurring charges are not enabled. The admin gross-sales view is not the same as net bank payout: provider fees, refunds and settlement timing may affect what reaches your bank.
+
+Railway hosts the application; it does not receive customer payments. Customers pay through Paystack, and settlement goes to the bank account configured in your Paystack merchant account. Confirm test-mode payments first, then use live credentials for real customer payments.
