@@ -243,7 +243,7 @@ async def flutterwave_webhook(request: Request):
         event = await request.json()
     except ValueError:
         raise HTTPException(400, "Invalid webhook body.")
-    if event.get("event") in ("charge.completed", "charge.completed"):
+    if event.get("event") == "charge.completed":
         data = event.get("data") or {}
         reference = str(data.get("tx_ref", ""))
         transaction_id = data.get("id")
