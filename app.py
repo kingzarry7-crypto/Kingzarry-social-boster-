@@ -3,11 +3,15 @@ import hmac
 import json
 import os
 import secrets
+import smtplib
 import sqlite3
+import urllib.parse
+import urllib.request
+from email.message import EmailMessage
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -47,7 +51,7 @@ def now_iso():
 def init_db():
     with db() as c:
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT UNIQUE NOT NULL,salt TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT UNIQUE NOT NULL,salt TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL,phone TEXT NOT NULL DEFAULT '',email_verified INTEGER NOT NULL DEFAULT 1,phone_verified INTEGER NOT NULL DEFAULT 1);\n        CREATE TABLE IF NOT EXISTS pending_signups(email TEXT PRIMARY KEY,phone TEXT NOT NULL,salt TEXT NOT NULL,password_hash TEXT NOT NULL,email_code_hash TEXT NOT NULL,sms_code_hash TEXT NOT NULL,expires_at TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,name TEXT NOT NULL,platform TEXT NOT NULL,goal TEXT NOT NULL,audience TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'draft',created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS content_items(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,platform TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,body TEXT NOT NULL,scheduled_at TEXT,status TEXT NOT NULL DEFAULT 'draft',created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,platform TEXT NOT NULL,username TEXT NOT NULL,niche TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -85,6 +89,14 @@ def platform_name(value):
 class AuthInput(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8, max_length=128)
+
+class RegisterInput(AuthInput):
+    phone: str = Field(min_length=7, max_length=30)
+
+class VerifySignupInput(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    email_code: str = Field(min_length=6, max_length=6)
+    sms_code: str = Field(min_length=6, max_length=6)
 
 class GenerateInput(BaseModel):
     platform: str
@@ -159,22 +171,127 @@ def health():
 def status():
     return {"name":APP_NAME,"platforms":PLATFORMS,"ai_configured":bool(os.getenv("OPENAI_API_KEY") and os.getenv("AI_MODEL")),"ai_provider":os.getenv("OPENAI_BASE_URL","https://openrouter.ai/api/v1"),"features":{"profile_audit":True,"content_studio":True,"campaigns":True,"content_calendar":True,"official_social_oauth":True,"publishing":{"facebook":True,"instagram":True,"tiktok":"submission flow; provider status must be polled","x":True,"youtube":False},"live_analytics":{"facebook":True,"instagram":True,"tiktok":True,"youtube":True,"x":True}},"note":"OAuth endpoints and supported publishing/analytics adapters are implemented. Provider credentials, app review, account permissions and user authorization are required before real actions work."}
 
+def normalize_phone(value):
+    phone = "".join(ch for ch in str(value or "").strip() if ch.isdigit() or ch == "+")
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    if phone.startswith("0") and len(phone) == 11:
+        phone = os.getenv("PHONE_COUNTRY_CODE", "+234").strip() + phone[1:]
+    if not phone.startswith("+") or not phone[1:].isdigit() or not (8 <= len(phone[1:]) <= 15):
+        raise HTTPException(422, "Enter a valid international phone number, e.g. +2348012345678.")
+    return phone
+
+def otp_digest(email, channel, code):
+    return hmac.new(APP_SECRET.encode(), (email + "|" + channel + "|" + code).encode(), hashlib.sha256).hexdigest()
+
+def send_email_otp(email, code):
+    host = os.getenv("SMTP_HOST", "").strip()
+    username = os.getenv("SMTP_USER", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    sender = os.getenv("SMTP_FROM_EMAIL", username).strip()
+    if not all((host, username, password, sender)):
+        raise HTTPException(503, "Email verification is not configured. Add SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM_EMAIL in Railway Variables.")
+    message = EmailMessage()
+    message["Subject"] = "Your King Zarry Social Booster verification code"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content("Your King Zarry Social Booster email verification code is: " + code + "\n\nThis code expires in 10 minutes. If you did not request it, ignore this email.")
+    try:
+        port = int(os.getenv("SMTP_PORT", "587"))
+        if os.getenv("SMTP_USE_SSL", "false").lower() == "true":
+            with smtplib.SMTP_SSL(host, port, timeout=20) as server:
+                server.login(username, password)
+                server.send_message(message)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(username, password)
+                server.send_message(message)
+    except (OSError, smtplib.SMTPException, ValueError) as exc:
+        raise HTTPException(502, "The email provider could not send your verification code. Check SMTP settings and try again.") from exc
+
+def send_sms_otp(phone, code):
+    api_key = os.getenv("TERMII_API_KEY", "").strip()
+    sender = os.getenv("TERMII_SENDER_ID", "").strip()
+    if not api_key or not sender:
+        raise HTTPException(503, "SMS verification is not configured. Add TERMII_API_KEY and an approved TERMII_SENDER_ID in Railway Variables.")
+    payload = json.dumps({
+        "api_key": api_key, "to": phone, "from": sender,
+        "sms": "Your King Zarry Social Booster verification code is " + code + ". It expires in 10 minutes.",
+        "type": "plain", "channel": "generic"
+    }).encode()
+    req = urllib.request.Request("https://api.ng.termii.com/api/sms/send", data=payload, method="POST", headers={"Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            result = json.loads(response.read().decode())
+        if str(result.get("code", "")) not in ("ok", "200", "0") and result.get("message", "").lower() not in ("message sent", "ok"):
+            raise ValueError("SMS provider did not confirm acceptance")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(502, "The SMS provider could not send your verification code. Check Termii balance, sender ID approval and settings.") from exc
+
 @app.post("/api/auth/register")
-def register(body: AuthInput, request: Request):
+def register(body: RegisterInput):
     email = body.email.strip().lower()
     if "@" not in email or "." not in email.split("@")[-1]:
         raise HTTPException(422, "Enter a valid email address.")
+    phone = normalize_phone(body.phone)
+    if not (os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASSWORD") and os.getenv("TERMII_API_KEY") and os.getenv("TERMII_SENDER_ID")):
+        raise HTTPException(503, "Signup verification is not ready. The owner must configure SMTP email and Termii SMS credentials in Railway Variables first. No account has been created.")
+    with db() as c:
+        if c.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+            raise HTTPException(409, "An account with this email already exists. Sign in instead.")
+        existing = c.execute("SELECT 1 FROM pending_signups WHERE email=?", (email,)).fetchone()
     salt, digest = password_hash(body.password)
+    email_code = f"{secrets.randbelow(1000000):06d}"
+    sms_code = f"{secrets.randbelow(1000000):06d}"
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    with db() as c:
+        c.execute("""INSERT INTO pending_signups(email,phone,salt,password_hash,email_code_hash,sms_code_hash,expires_at,attempts,created_at)
+                     VALUES(?,?,?,?,?,?,?,0,?)
+                     ON CONFLICT(email) DO UPDATE SET phone=excluded.phone,salt=excluded.salt,password_hash=excluded.password_hash,
+                     email_code_hash=excluded.email_code_hash,sms_code_hash=excluded.sms_code_hash,expires_at=excluded.expires_at,attempts=0,created_at=excluded.created_at""",
+                  (email, phone, salt, digest, otp_digest(email, "email", email_code), otp_digest(email, "sms", sms_code), expires, now_iso()))
+    # Fail honestly if either real provider cannot deliver. Codes are never returned to the browser.
+    send_email_otp(email, email_code)
+    send_sms_otp(phone, sms_code)
+    return {"ok": True, "verification_required": True, "email": email, "phone_masked": phone[:4] + "••••" + phone[-3:], "expires_in_seconds": 600, "message": "Verification codes sent. Enter the email code and SMS code to finish creating your account."}
+
+@app.post("/api/auth/verify-signup")
+def verify_signup(body: VerifySignupInput, request: Request):
+    email = body.email.strip().lower()
+    with db() as c:
+        pending = c.execute("SELECT * FROM pending_signups WHERE email=?", (email,)).fetchone()
+    if not pending:
+        raise HTTPException(404, "No pending signup was found. Start account creation again.")
+    if datetime.fromisoformat(pending["expires_at"]) <= datetime.now(timezone.utc):
+        with db() as c:
+            c.execute("DELETE FROM pending_signups WHERE email=?", (email,))
+        raise HTTPException(410, "Verification codes expired. Start account creation again.")
+    if int(pending["attempts"]) >= 5:
+        with db() as c:
+            c.execute("DELETE FROM pending_signups WHERE email=?", (email,))
+        raise HTTPException(429, "Too many incorrect codes. Start account creation again.")
+    valid_email = hmac.compare_digest(pending["email_code_hash"], otp_digest(email, "email", body.email_code.strip()))
+    valid_sms = hmac.compare_digest(pending["sms_code_hash"], otp_digest(email, "sms", body.sms_code.strip()))
+    if not (valid_email and valid_sms):
+        with db() as c:
+            c.execute("UPDATE pending_signups SET attempts=attempts+1 WHERE email=?", (email,))
+        raise HTTPException(400, "Email code or SMS code is incorrect.")
     try:
         with db() as c:
-            cur = c.execute("INSERT INTO users(email,salt,password_hash,created_at) VALUES(?,?,?,?)",(email,salt,digest,now_iso()))
+            cur = c.execute("INSERT INTO users(email,salt,password_hash,created_at,phone,email_verified,phone_verified) VALUES(?,?,?,?,?,1,1)",
+                            (email, pending["salt"], pending["password_hash"], now_iso(), pending["phone"]))
             uid = cur.lastrowid
+            c.execute("DELETE FROM pending_signups WHERE email=?", (email,))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists. Sign in instead.")
     request.session.clear()
     request.session["user_id"] = int(uid)
     request.session["email"] = email
-    return {"ok":True,"email":email}
+    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}
+    return {"ok": True, "email": email, "role": "admin" if email in admins else "user", "plan": "free", "admin_free_access": email in admins}
 
 @app.post("/api/auth/login")
 def login(body: AuthInput, request: Request):
@@ -186,7 +303,7 @@ def login(body: AuthInput, request: Request):
     request.session.clear()
     request.session["user_id"] = int(row["id"])
     request.session["email"] = row["email"]
-    return {"ok":True,"email":row["email"]}
+    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}\n    return {"ok":True,"email":row["email"],"role":"admin" if row["email"].lower() in admins else "user","admin_free_access":row["email"].lower() in admins}
 
 @app.post("/api/auth/logout")
 def logout(request: Request):
@@ -195,7 +312,7 @@ def logout(request: Request):
 
 @app.get("/api/me")
 def me(request: Request):
-    return {"email":request.session.get("email",""),"user_id":user_id(request)}
+    email = str(request.session.get("email", "")).lower()\n    admins = {x.strip().lower() for x in os.getenv("ADMIN_EMAILS", "").split(",") if x.strip()}\n    return {"email":email,"user_id":user_id(request),"role":"admin" if email in admins else "user","plan":"free","admin_free_access":email in admins}
 
 @app.get("/api/dashboard")
 def dashboard(request: Request):
