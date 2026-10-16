@@ -56,6 +56,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS content_items(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,platform TEXT NOT NULL,kind TEXT NOT NULL,topic TEXT NOT NULL,body TEXT NOT NULL,scheduled_at TEXT,status TEXT NOT NULL DEFAULT 'draft',created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,platform TEXT NOT NULL,username TEXT NOT NULL,niche TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL);
         """)
+        user_columns = {row["name"] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "phone" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+        if "email_verified" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1")
+        if "phone_verified" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 1")
 
 init_db()
 
