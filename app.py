@@ -155,7 +155,7 @@ def health():
 
 @app.get("/api/status")
 def status():
-    return {"name":APP_NAME,"platforms":PLATFORMS,"ai_configured":bool(os.getenv("OPENAI_API_KEY") and os.getenv("AI_MODEL")),"features":{"profile_audit":True,"content_studio":True,"campaigns":True,"content_calendar":True,"official_social_oauth":False,"publishing":False,"live_analytics":False},"note":"Publishing and live analytics require official platform integrations and user authorization."}
+    return {"name":APP_NAME,"platforms":PLATFORMS,"ai_configured":bool(os.getenv("OPENAI_API_KEY") and os.getenv("AI_MODEL")),"ai_provider":os.getenv("OPENAI_BASE_URL","https://openrouter.ai/api/v1"),"features":{"profile_audit":True,"content_studio":True,"campaigns":True,"content_calendar":True,"official_social_oauth":True,"publishing":{"facebook":True,"instagram":True,"tiktok":"submission flow; provider status must be polled","x":True,"youtube":False},"live_analytics":{"facebook":True,"instagram":True,"tiktok":True,"youtube":True,"x":True}},"note":"OAuth endpoints and supported publishing/analytics adapters are implemented. Provider credentials, app review, account permissions and user authorization are required before real actions work."}
 
 @app.post("/api/auth/register")
 def register(body: AuthInput, request: Request):
